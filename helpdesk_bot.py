@@ -17,22 +17,27 @@ llm = OllamaLLM(model="phi3.5", temperature=0.7)  # Add any other parameters if 
 # Use Hugging Face embeddings (Explicitly specify model)
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Initialize ChromaDB
+# Ensure ChromaDB uses the correct persistent directory
 chroma_client = chromadb.PersistentClient(path="db")
-faq_collection = chroma_client.get_or_create_collection(name="faqs")
 
-# Set up a retriever using ChromaDB
-retriever = Chroma(persist_directory="db", embedding_function=embedding_model).as_retriever()
-
-faq_collection.add(
-    ids=["1", "2"],  # Unique IDs
-    documents=["How do I reset my password?", "Where can I contact customer support?"],
-    metadatas=[{"category": "password"}, {"category": "support"}]
+# Use Chroma's native LangChain wrapper
+vector_db = Chroma(
+    persist_directory="db",
+    embedding_function=embedding_model
 )
 
-test_query = "password reset"
-results = retriever.get_relevant_documents(test_query)
-print("Retrieved documents:", results)
+# Ensure documents are added properly
+vector_db.add_texts(
+    texts=["How do I reset my password?", "Where can I contact customer support?"],
+    metadatas=[{"category": "password"}, {"category": "support"}],
+    ids=["1", "2"]
+)
+
+# Set up retriever
+retriever = vector_db.as_retriever()
+
+
+
 
 # Create QA chain using Phi-3.5
 qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
@@ -65,7 +70,7 @@ async def handle_message(update: Update, context: CallbackContext):
     user_message = update.message.text
 
     # Step 1: Retrieve relevant documents from ChromaDB
-    results = retriever.get_relevant_documents(user_message)
+    results = retriever.invoke(user_message)
 
     # Step 2: Log the retrieved documents
     logger.info(f"Retrieved documents: {results}")
