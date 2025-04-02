@@ -8,7 +8,7 @@ faq_collection = chroma_client.get_or_create_collection(name="faqs")
 
 faq_collection.add(
     ids=["faq1", "faq2"],
-    metadatas=[{"category": "password"}, {"category": "billing"}],
+    metadatas=[{"category": "password"}, {"category": "refund"}],
     documents=[
         "How do I reset my password?",
         "What is the refund policy?"
@@ -20,4 +20,5 @@ results = faq_collection.query(
     query_texts=[query],
     n_results=2
 )
-print(results)
+print("Retrieved documents:", results)
+

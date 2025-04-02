@@ -12,7 +12,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 
 # Use Ollama's Phi-3.5 as LLM
-llm = OllamaLLM(model="phi3.5", temperature=0.7)  # Add any other parameters if needed
+llm = OllamaLLM(model="phi3.5", temperature=0.7, max_tokens=50)  # Shorter responses
 
 # Use Hugging Face embeddings (Explicitly specify model)
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -34,13 +34,28 @@ vector_db.add_texts(
 )
 
 # Set up retriever
-retriever = vector_db.as_retriever()
+retriever = vector_db.as_retriever(search_kwargs={"k": 2})  # k = max docs available
 
 
+from langchain.prompts import PromptTemplate
 
+# Define a prompt template for short, factual responses
+qa_prompt = PromptTemplate.from_template(
+    "Answer the following question using ONLY the retrieved documents. "
+    "Keep your response short, to the point, and similar to how a customer service agent would reply. "
+    "If you don't know, say 'I'm not sure, please contact support for more details.'\n\n"
+    "Question: {question}\n\n"
+    "Relevant Information: {context}\n\n"
+    "Short Answer:"
+)
 
-# Create QA chain using Phi-3.5
-qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
+# Create QA chain with custom prompt
+qa = RetrievalQA.from_chain_type(
+    llm=llm, 
+    retriever=retriever,
+    chain_type_kwargs={"prompt": qa_prompt}
+)
+
 
 # Enable logging for debugging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -80,18 +95,19 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text("I couldn't find related information. Please try rephrasing.")
         return
 
-    # Step 4: Use retrieved data for RAG response
-    response = qa.run(user_message)
+    # Step 4: Use retrieved data for RAG response with `run()`
+    response_text = qa.run(user_message)  # `run()` ensures a clean text response
 
     # Store user query in PostgreSQL
     cursor.execute(
         "INSERT INTO queries (user_id, query, response, thread_id) VALUES (%s, %s, %s, %s)",
-        (user_id, user_message, response, "thread_001")  # Thread ID for tracking
+        (user_id, user_message, response_text, "thread_001")
     )
     conn.commit()
 
     # Step 5: Send the response to the user
-    await update.message.reply_text(response)
+    await update.message.reply_text(response_text)
+
 
 
 # Main function to run the bot using polling

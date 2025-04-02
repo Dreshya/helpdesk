@@ -1,0 +1,18 @@
+
+
+<a href="#" onclick="openTelegramChat()">Chat with our AI Helpdesk</a>
+
+<script>
+function openTelegramChat() {
+    let webTelegram = "https://web.telegram.org/k/#@helpdesk_chatbot";
+    let appTelegram = "tg://resolve?domain=helpdesk_chatbot";
+
+    // Try opening Telegram Web first
+    window.open(appTelegram, "_blank");
+
+    // If Telegram Web doesn't work, try opening the app
+    setTimeout(() => {
+        window.location.href = webTelegram;
+    }, 3000);  // Wait 3 seconds before switching
+}
+</script>
