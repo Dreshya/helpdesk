@@ -1,24 +1,32 @@
 import chromadb
+from sentence_transformers import SentenceTransformer
 
-# Create a ChromaDB instance (persists data in the "db" folder)
-chroma_client = chromadb.PersistentClient(path="db")
+# Initialize ChromaDB
+client = chromadb.PersistentClient(path="./chroma_db")
+collection = client.get_or_create_collection("helpdesk_faq")
 
-# Create a collection (like a database table)
-faq_collection = chroma_client.get_or_create_collection(name="faqs")
+# Load embedding model
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
 
-faq_collection.add(
-    ids=["faq1", "faq2"],
-    metadatas=[{"category": "password"}, {"category": "refund"}],
-    documents=[
-        "How do I reset my password?",
-        "What is the refund policy?"
-    ]
+# Documents
+docs = [
+    "How can I reset my password?",
+    "Where can I view my order history?",
+    "How to contact support?"
+]
+embeddings = embedder.encode(docs).tolist()
+
+# Add documents
+collection.add(
+    documents=docs,
+    embeddings=embeddings,
+    metadatas=[{"source": "faq"} for _ in docs],
+    ids=[f"doc_{i}" for i in range(len(docs))]
 )
 
-query = "How can I change my password?"
-results = faq_collection.query(
-    query_texts=[query],
-    n_results=2
-)
-print("Retrieved documents:", results)
+# Query
+query = "forgot password"
+query_embedding = embedder.encode([query]).tolist()
+results = collection.query(query_embeddings=query_embedding, n_results=1)
 
+print(results)

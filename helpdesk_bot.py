@@ -62,7 +62,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # Replace with your actual bot token
-TOKEN = "7400853171:AAErpgO0P4SaU4ADP_p7zMxjfT26dCE5JbE"
+TOKEN = "7400853171:AAFM5DVXu1w9Jx_mN3xgbP5SHfWFr3cK3kk"
 
 # Define command handlers
 async def start(update: Update, context: CallbackContext):
