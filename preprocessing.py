@@ -10,12 +10,10 @@ def extract_text_from_xml(file_path):
     parser = etree.XMLParser(recover=True)
     tree = etree.parse(file_path, parser)
     root = tree.getroot()
-    
-    texts = []
-    for elem in root.iter():
-        if elem.text and elem.text.strip():
-            texts.append(elem.text.strip())
-    return "\n".join(texts)
+
+    text = etree.tostring(root, encoding="unicode", method="text")
+    return "\n".join([line.strip() for line in text.splitlines() if line.strip()])
+
 
 # === 2. Chunking ===
 def chunk_text(text, chunk_size=500, chunk_overlap=100):
