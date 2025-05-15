@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ProjectDocumentation>
+    <ProjectInfo>
+        <ProjectName>Inventory Management System</ProjectName>
+        <ProjectID>IMS-2025</ProjectID>
+        <Version>1.2.0</Version>
+        <Description>
+            A web-based system to manage inventory across multiple warehouses with
+            real-time stock tracking, reporting, and automated restocking features.
+        </Description>
+        <StartDate>2025-02-01</StartDate>
+        <EndDate>2025-10-31</EndDate>
+        <Status>In Progress</Status>
+    </ProjectInfo>
+
+    <Team>
+        <ProjectManager>
+            <Name>Lisa Grant</Name>
+            <Email>lisa.grant@company.com</Email>
+        </ProjectManager>
+        <Developers>
+            <Developer>
+                <Name>John Doe</Name>
+                <Role>Backend Developer</Role>
+                <Email>john.doe@company.com</Email>
+            </Developer>
+            <Developer>
+                <Name>Maria Chen</Name>
+                <Role>Frontend Developer</Role>
+                <Email>maria.chen@company.com</Email>
+            </Developer>
+        </Developers>
+        <QA>
+            <Tester>
+                <Name>Robert Kim</Name>
+                <Role>QA Engineer</Role>
+                <Email>robert.kim@company.com</Email>
+            </Tester>
+        </QA>
+    </Team>
+
+    <Requirements>
+        <Requirement id="REQ-001">
+            <Title>User Authentication</Title>
+            <Description>Users must be able to log in securely with roles (Admin, Manager, Viewer).</Description>
+            <Priority>High</Priority>
+            <Status>Completed</Status>
+        </Requirement>
+        <Requirement id="REQ-002">
+            <Title>Inventory Reporting</Title>
+            <Description>Generate monthly and on-demand reports for inventory status by location.</Description>
+            <Priority>Medium</Priority>
+            <Status>In Progress</Status>
+        </Requirement>
+    </Requirements>
+
+    <Milestones>
+        <Milestone>
+            <Title>Prototype Completion</Title>
+            <Date>2025-04-15</Date>
+            <Status>Achieved</Status>
+        </Milestone>
+        <Milestone>
+            <Title>Beta Release</Title>
+            <Date>2025-08-01</Date>
+            <Status>Upcoming</Status>
+        </Milestone>
+    </Milestones>
+
+    <Dependencies>
+        <Dependency>
+            <Name>PostgreSQL</Name>
+            <Version>15.0</Version>
+        </Dependency>
+        <Dependency>
+            <Name>React</Name>
+            <Version>18.2.0</Version>
+        </Dependency>
+        <Dependency>
+            <Name>Node.js</Name>
+            <Version>20.0.0</Version>
+        </Dependency>
+    </Dependencies>
+
+    <Notes>
+        <Note date="2025-03-10">
+            Initial design review completed. Adjustments required in user permission hierarchy.
+        </Note>
+        <Note date="2025-04-20">
+            DevOps pipeline set up using GitHub Actions and Docker.
+        </Note>
+    </Notes>
+</ProjectDocumentation>
