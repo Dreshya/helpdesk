@@ -1,9 +1,13 @@
 # === [1] Import Required Modules ===
-from langchain.vectorstores import Chroma
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaLLM
 from langchain_community.llms import Ollama
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
+
 
 # === [2] Load Your Embeddings from ChromaDB ===
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -17,14 +21,15 @@ vectorstore = Chroma(
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
 # === [3] Load Phi-3.5 via Ollama ===
-llm = Ollama(model="phi3.5", temperature=0.2)
+llm = OllamaLLM(model="phi3.5", temperature=0.2)
 
 # === [4] Define Custom Prompt to Prevent Hallucination ===
 prompt_template = PromptTemplate(
     input_variables=["context", "question"],
     template="""
 You are an intelligent support assistant. Answer the question using ONLY the information from the context below.
-If the answer is not contained in the context, say "I don't know."
+Do not mention where the context was located in the documentation.
+If the answer is not contained in the context, say "I am not sure."
 
 Context:
 {context}
@@ -44,7 +49,7 @@ qa_chain = RetrievalQA.from_chain_type(
 
 # === [6] Ask a Question and Get an Answer ===
 def ask_question(query: str):
-    result = qa_chain({"query": query})
+    result = qa_chain.invoke({"query": query})
 
     print("\n📌 Answer:")
     print(result["result"])

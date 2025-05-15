@@ -13,40 +13,40 @@ def extract_text_from_xml(file_path):
 
     lines = []
 
-    def recurse(element, depth=0):
-        indent = "  " * depth
-        tag_line = f"{indent}<{element.tag}>"
-        lines.append(tag_line)
+    def recurse(element, path=""):
+        current_path = f"{path}/{element.tag}" if path else element.tag
 
+        # If element has meaningful text
         if element.text and element.text.strip():
-            lines.append(f"{indent}  {element.text.strip()}")
+            lines.append(f"{current_path.replace('/', ' > ')}: {element.text.strip()}")
 
+        # Recurse into children
         for child in element:
-            recurse(child, depth + 1)
-
-        end_tag = f"{indent}</{element.tag}>"
-        lines.append(end_tag)
+            recurse(child, current_path)
 
     recurse(root)
     return "\n".join(lines)
 
 
 
+
 # === 2. Chunking ===
-def chunk_text(text, chunk_size=30, chunk_overlap=10):
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+def chunk_text_linewise(text, chunk_size=30, chunk_overlap=10):
+    lines = text.splitlines()
+    lines = [line.strip() for line in lines if line.strip()]  # Keep all non-empty lines
+
     chunks = []
-    start = 0
+    i = 0
 
-    while start < len(lines):
-        end = start + chunk_size
-        chunk = "\n".join(lines[start:end])
+    while i < len(lines):
+        chunk = "\n".join(lines[i:i + chunk_size])
         chunks.append(chunk)
+        i += chunk_size - chunk_overlap
 
-        if end >= len(lines):  # ensure final lines aren't skipped
-            break
-
-        start += chunk_size - chunk_overlap
+    # Ensure last few lines are not missed
+    if lines and "\n".join(lines[-chunk_size:]) not in chunks[-1]:
+        final_chunk = "\n".join(lines[-chunk_size:])
+        chunks.append(final_chunk)
 
     return chunks
 
@@ -81,10 +81,23 @@ def store_in_chromadb(chunks, embeddings, xml_path):
 def process_and_store_xml(xml_path):
     print(f"Processing: {xml_path}")
     raw_text = extract_text_from_xml(xml_path)
-    chunks = chunk_text(raw_text)
+
+    all_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    print(f"Total extracted lines: {len(all_lines)}")
+
+    chunks = chunk_text_linewise(raw_text)
+    print(f"Total chunks created: {len(chunks)}")
+
+    # Debug: ensure last few lines are covered
+    print("Last 5 lines extracted:")
+    print("\n".join(all_lines[-5:]))
+    print("Last chunk preview:")
+    print(chunks[-1])
+
     embeddings = embed_chunks(chunks)
     store_in_chromadb(chunks, embeddings, xml_path)
     print(f"Stored {len(chunks)} chunks in ChromaDB.")
+
 
 
 # === Run the pipeline ===
