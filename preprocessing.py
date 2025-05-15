@@ -63,13 +63,19 @@ def embed_chunks(chunks):
 chroma_client = chromadb.PersistentClient(path="./chroma_storage")
 collection = chroma_client.get_or_create_collection(name="xml_knowledge")
 
-def store_in_chromadb(chunks, embeddings):
+def store_in_chromadb(chunks, embeddings, xml_path):
     for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        metadata = {
+            "source_file": os.path.basename(xml_path),
+            "chunk_index": i,
+        }
         collection.add(
             documents=[chunk],
             embeddings=[embedding],
-            ids=[f"xml_chunk_{i}"]
+            ids=[f"xml_chunk_{i}"],
+            metadatas=[metadata]
         )
+
 
 # === 5. Pipeline ===
 def process_and_store_xml(xml_path):
@@ -77,8 +83,9 @@ def process_and_store_xml(xml_path):
     raw_text = extract_text_from_xml(xml_path)
     chunks = chunk_text(raw_text)
     embeddings = embed_chunks(chunks)
-    store_in_chromadb(chunks, embeddings)
+    store_in_chromadb(chunks, embeddings, xml_path)
     print(f"Stored {len(chunks)} chunks in ChromaDB.")
+
 
 # === Run the pipeline ===
 if __name__ == "__main__":
