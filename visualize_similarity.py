@@ -24,16 +24,31 @@ query = "What are the modules involved in this project and its uses?"
 query_embedding = embedding_model.embed_query(query)
 retrieved_docs = retriever.get_relevant_documents(query)
 
+
 # === [5] Get All Stored Embeddings (Raw from Chroma) ===
 collection = vectorstore._collection
 all_embeddings = []
 all_texts = []
 
-# You can access raw documents and embeddings via Chroma client
 docs = collection.get(include=["embeddings", "documents"])
 for emb, text in zip(docs["embeddings"], docs["documents"]):
     all_embeddings.append(emb)
     all_texts.append(text)
+
+# ✅ === [5.5] Calculate Cosine Similarity ===
+from numpy.linalg import norm
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (norm(a) * norm(b))
+
+cosine_scores = [cosine_similarity(query_embedding, emb) for emb in all_embeddings]
+
+top_k = 3
+top_indices = np.argsort(cosine_scores)[::-1][:top_k]
+print("\n📌 Top-K Most Similar Documents (Cosine Similarity):")
+for i in top_indices:
+    print(f"Doc {i}: score = {cosine_scores[i]:.4f}")
+    print(all_texts[i][:200], "...\n")
 
 # === [6] Add the Query Embedding ===
 all_embeddings = np.array(all_embeddings)

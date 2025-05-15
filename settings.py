@@ -1,0 +1,18 @@
+from langchain_ollama import OllamaLLM
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+
+# === Embeddings ===
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+# === Vector Store ===
+vector_db = Chroma(
+    persist_directory="chroma_storage",
+    collection_name="xml_knowledge",
+    embedding_function=embedding_model
+)
+
+retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+
+# === LLM Model ===
+llm = OllamaLLM(model="phi3.5", temperature=0.2)

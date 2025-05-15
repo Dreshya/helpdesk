@@ -50,13 +50,17 @@ qa_chain = RetrievalQA.from_chain_type(
 # === [6] Ask a Question and Get an Answer ===
 def ask_question(query: str):
     result = qa_chain.invoke({"query": query})
+    docs_with_scores = vectorstore.similarity_search_with_score(query, k=3)
 
     print("\n📌 Answer:")
     print(result["result"])
 
     print("\n📚 Retrieved Source Chunks:")
-    for i, doc in enumerate(result["source_documents"]):
+    for i, (doc, (source_doc, score)) in enumerate(zip(result["source_documents"], docs_with_scores)):
         print(f"\n--- Chunk {i+1} ---\n{doc.page_content.strip()}")
+        print(f"Similarity Score: {score:.4f}")
+        print(score)
+
 
 # === [7] Example Usage ===
 if __name__ == "__main__":
