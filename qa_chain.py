@@ -23,6 +23,16 @@ qa_chain = RetrievalQA.from_chain_type(
     return_source_documents=True
 )
 
+# === In-Memory Cache ===
+response_cache = {}
+
 def answer_query(query: str) -> str:
+    if query in response_cache:
+        print(f"[CACHE HIT] Returning cached result for: {query}")
+        return response_cache[query]
+
+    print(f"[CACHE MISS] Running QA chain for: {query}")
     response = qa_chain.invoke({"query": query})
-    return response["result"]
+    result = response["result"]
+    response_cache[query] = result  # Store in cache
+    return result
