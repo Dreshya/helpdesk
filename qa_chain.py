@@ -1,38 +1,41 @@
-from langchain.chains import RetrievalQA
+from langchain.chains import ConversationalRetrievalChain
 from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferMemory
 from settings import llm, retriever
 
-# === Custom Prompt ===
+# === Memory Object ===
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+# === Prompt Template (Optional - default one works too) ===
 prompt_template = PromptTemplate.from_template("""
-You are an intelligent support assistant. Answer the question using ONLY the information from the context below.
-Do not mention where the context was located in the documentation.
-If the answer is not contained in the context, say "I am not sure."
+You are an intelligent support assistant. Use the following conversation and context to answer the user's question.
+Keep your answers short, clear, and casual — like you're chatting with a friend.
+Answer using no more than 5 short sentences. Only use the provided context to answer the question. If you're unsure, say "I am not sure."
 
 Context:
 {context}
 
+Chat History:
+{chat_history}
+
 Question: {question}
 """)
 
-# === QA Chain ===
-qa_chain = RetrievalQA.from_chain_type(
+# === Conversational QA Chain ===
+qa_chain = ConversationalRetrievalChain.from_llm(
     llm=llm,
     retriever=retriever,
-    chain_type="stuff",
-    chain_type_kwargs={"prompt": prompt_template},
-    return_source_documents=True
+    memory=memory,
+    combine_docs_chain_kwargs={"prompt": prompt_template}
 )
 
-# === In-Memory Cache ===
-response_cache = {}
-
+# === Handle Conversation-Aware Query ===
 def answer_query(query: str) -> str:
-    if query in response_cache:
-        print(f"[CACHE HIT] Returning cached result for: {query}")
-        return response_cache[query]
+    response = qa_chain.invoke({"question": query})
+    answer = response["answer"]
 
-    print(f"[CACHE MISS] Running QA chain for: {query}")
-    response = qa_chain.invoke({"query": query})
-    result = response["result"]
-    response_cache[query] = result  # Store in cache
-    return result
+    # Telegram limit is 4096 characters
+    if len(answer) > 4000:
+        return answer[:4000] + "\n\n...(truncated)"
+    return answer
+

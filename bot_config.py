@@ -12,8 +12,9 @@ async def start(update: Update, context: CallbackContext):
     await update.message.reply_text("Hello! I'm your AI Helpdesk Bot. How can I assist you?")
 
 async def handle_message(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
     user_message = update.message.text
-    logger.info(f"Received: {user_message}")
+    logger.info(f"Received from {user_id}: {user_message}")
 
     response = answer_query(user_message)
     await update.message.reply_text(response)
