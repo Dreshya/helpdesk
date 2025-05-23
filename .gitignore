@@ -1,0 +1,36 @@
+# Environment variables
+.env
+
+# ChromaDB storage
+chroma_storage/
+
+# SQLite database
+sessions.db
+
+# Python cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+
+# Streamlit temporary files
+.streamlit/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# System files
+.DS_Store
+Thumbs.db
