@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project id="alpha_2025">
+    <name>Project Alpha</name>
+    <description>
+        Project Alpha aims to develop a cloud-based task management system to enhance team productivity.
+        The system includes features like task assignment, progress tracking, and real-time collaboration.
+    </description>
+    <objectives>
+        <objective>Develop a scalable backend using Django and PostgreSQL.</objective>
+        <objective>Implement a responsive frontend with React.</objective>
+        <objective>Integrate third-party APIs for calendar and notifications.</objective>
+    </objectives>
+    <milestones>
+        <milestone id="m1">
+            <title>Requirement Analysis</title>
+            <due_date>2025-06-15</due_date>
+            <status>Completed</status>
+        </milestone>
+        <milestone id="m2">
+            <title>Backend Development</title>
+            <due_date>2025-08-30</due_date>
+            <status>In Progress</status>
+        </milestone>
+    </milestones>
+    <team>
+        <member role="project_manager">
+            <name>Alice Johnson</name>
+            <email>alice.johnson@company.com</email>
+        </member>
+        <member role="lead_developer">
+            <name>Bob Smith</name>
+            <email>bob.smith@company.com</email>
+        </member>
+    </team>
+    <contact>
+        <support_email>support@projectalpha.com</support_email>
+        <phone>+1-555-123-4567</phone>
+    </contact>
+</project>
+```

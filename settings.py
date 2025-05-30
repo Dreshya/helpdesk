@@ -12,7 +12,12 @@ vector_db = Chroma(
     embedding_function=embedding_model
 )
 
-retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+def get_retriever(doc_id: str = None):
+    if doc_id:
+        return vector_db.as_retriever(
+            search_kwargs={"k": 3, "filter": {"doc_id": doc_id}}
+        )
+    return vector_db.as_retriever(search_kwargs={"k": 3})
 
 # === LLM Model ===
 llm = OllamaLLM(model="phi3.5", temperature=0.2)
