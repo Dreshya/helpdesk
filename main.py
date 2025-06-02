@@ -2,12 +2,13 @@ from telegram.ext import Application
 from bot_config import register_handlers
 from dotenv import load_dotenv
 import os
-
+from qa_chain import clear_cache_and_memory
 def main():
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
+        raise ValueError("TELEGRAM_BOT_TOKEN not found")
+    clear_cache_and_memory()  # Clear cache on startup
     app = Application.builder().token(token).build()
     register_handlers(app)
     print("✅ AI Helpdesk Bot is running...")

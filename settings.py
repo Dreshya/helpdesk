@@ -20,4 +20,4 @@ def get_retriever(doc_id: str = None):
     return vector_db.as_retriever(search_kwargs={"k": 3})
 
 # === LLM Model ===
-llm = OllamaLLM(model="phi3.5", temperature=0.2)
+llm = OllamaLLM(model="mistral", temperature=0.2)
