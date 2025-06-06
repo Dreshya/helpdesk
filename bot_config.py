@@ -1,41 +1,98 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 import logging
+import sqlite3
+import uuid
 import re
 import asyncio
-from qa_chain import answer_query
-from session_manager import init_db, log_session, send_case_email
-from telegram.error import NetworkError
-from settings import vector_db
-from cachetools import TTLCache
 from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, CallbackContext
+from telegram.error import NetworkError
+from cachetools import TTLCache
+from qa_chain import answer_query, clear_cache_and_memory
+from session_manager import SessionManager, init_db, log_session, send_case_email, summarize_session
+from settings import vector_db
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === State for Email Collection and Session ===
+# === Session Manager and State ===
+session_manager = SessionManager()
 user_states = {}
-
-# === Cache for Project to doc_id Mapping ===
 project_cache = TTLCache(maxsize=100, ttl=86400)  # Cache for 24 hours
-
-# === Closing Phrases ===
-CLOSING_PHRASES = [
-    "thank you", "thanks", "bye", "goodbye", "done", "ok", "okay", "cheers"
-]
-
-# === Inactivity Timeout (5 minutes) ===
+CLOSING_PHRASES = ["thank you", "thanks", "bye", "goodbye", "done", "ok", "okay", "cheers"]
 INACTIVITY_TIMEOUT = timedelta(minutes=5)
 
+# === Database Connection ===
+def get_db_connection():
+    conn = sqlite3.connect('helpdesk.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# === Check Subscription and Project Access ===
+def check_access(chat_id: str, doc_id: str = None) -> tuple:
+    conn = get_db_connection()
+    try:
+        # Get employee and business
+        cursor = conn.execute(
+            "SELECT e.business_id, b.name FROM Employees e JOIN Businesses b ON e.business_id = b.business_id WHERE e.chat_id = ?",
+            (chat_id,)
+        )
+        employee = cursor.fetchone()
+        if not employee:
+            return False, "You are not registered. Use /register <code> to link your account."
+
+        business_id = employee['business_id']
+        # Check subscription
+        cursor = conn.execute(
+            "SELECT end_date FROM Subscriptions WHERE business_id = ? AND end_date >= date('now')",
+            (business_id,)
+        )
+        subscription = cursor.fetchone()
+        if not subscription:
+            return False, "Your company's subscription has expired."
+
+        # Check project access if doc_id provided
+        if doc_id:
+            cursor = conn.execute(
+                "SELECT access_id FROM ProjectAccess WHERE business_id = ? AND doc_id = ?",
+                (business_id, doc_id)
+            )
+            if not cursor.fetchone():
+                return False, f"You do not have access to project {doc_id}."
+        
+        return True, None
+    finally:
+        conn.close()
+
 # === Get Project to doc_id Mapping from Chroma ===
-def get_project_doc_ids():
-    """Fetch project names and doc_ids from Chroma embedding_metadata."""
-    cache_key = "project_doc_ids"
+def get_project_doc_ids(chat_id: str):
+    cache_key = f"project_doc_ids_{chat_id}"
     if cache_key in project_cache:
         return project_cache[cache_key]
 
     try:
+        # Get business_id for the user
+        conn = get_db_connection()
+        try:
+            cursor = conn.execute("SELECT business_id FROM Employees WHERE chat_id = ?", (chat_id,))
+            employee = cursor.fetchone()
+            if not employee:
+                logger.error(f"No employee found for chat_id: {chat_id}")
+                return {}
+            business_id = employee['business_id']
+        finally:
+            conn.close()
+
+        # Get accessible doc_ids from ProjectAccess
+        conn = get_db_connection()
+        try:
+            cursor = conn.execute("SELECT doc_id FROM ProjectAccess WHERE business_id = ?", (business_id,))
+            accessible_doc_ids = {row['doc_id'] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+        # Fetch projects from vector_db and filter by accessible doc_ids
         collection = vector_db.get()
         project_map = {}
         seen_doc_ids = set()
@@ -44,27 +101,28 @@ def get_project_doc_ids():
             if not doc_id:
                 logger.warning(f"No doc_id found in metadata for embedding_id: {embedding_id}")
                 continue
+            if doc_id not in accessible_doc_ids:
+                continue  # Skip projects not accessible to the business
             match = re.search(r'ProjectDocumentation > ProjectInfo > ProjectName: (.*?)(?:\n|$)', content, re.IGNORECASE)
             if match:
                 project_name = match.group(1).strip()
                 if doc_id not in seen_doc_ids:
                     project_map[project_name.lower()] = doc_id
                     seen_doc_ids.add(doc_id)
-                    logger.info(f"Found project: {project_name}, doc_id: {doc_id}, embedding_id: {embedding_id}")
+                    logger.info(f"Found project: {project_name}, doc_id: {doc_id}, embedding_id: {embedding_id} for business_id: {business_id}")
             else:
                 logger.warning(f"No project name found in document with embedding_id: {embedding_id}, doc_id: {doc_id}, content_snippet: {content[:100]}...")
         if not project_map:
-            logger.error("No projects found in Chroma storage")
+            logger.error(f"No accessible projects found for business_id: {business_id}")
         project_cache[cache_key] = project_map
-        logger.info(f"Discovered {len(project_map)} projects: {list(project_map.keys())}")
+        logger.info(f"Discovered {len(project_map)} projects for chat_id {chat_id}: {list(project_map.keys())}")
         return project_map
     except Exception as e:
-        logger.error(f"Failed to fetch project doc_ids from Chroma: {e}")
+        logger.error(f"Failed to fetch project doc_ids for chat_id {chat_id}: {e}")
         return {}
 
 # === Check Inactivity ===
 async def check_inactivity(app: Application):
-    """Periodically check for inactive users and prompt with End Session button."""
     while True:
         current_time = datetime.now()
         for user_id, state in list(user_states.items()):
@@ -72,26 +130,47 @@ async def check_inactivity(app: Application):
                 if current_time - state["last_message_time"] >= INACTIVITY_TIMEOUT:
                     try:
                         keyboard = [
-                            [InlineKeyboardButton("End Session", callback_data="end_session")]
+                            [InlineKeyboardButton("Resolved", callback_data="resolve_session"),
+                             InlineKeyboardButton("Unresolved", callback_data="unresolve_session")]
                         ]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         await app.bot.send_message(
                             chat_id=user_id,
-                            text="It looks like you're done! Click 'End Session' to provide an email for confirmation, or continue asking questions.",
+                            text="It looks like you're done! Was your query resolved or unresolved? Please select an option.",
                             reply_markup=reply_markup
                         )
-                        logger.info(f"Prompted user {user_id} with End Session button due to inactivity")
+                        logger.info(f"Prompted user {user_id} with resolution buttons due to inactivity")
                     except NetworkError as e:
                         logger.error(f"Failed to send inactivity prompt to user {user_id}: {e}")
         await asyncio.sleep(60)  # Check every minute
 
 # === Telegram Handlers ===
-async def start(update: Update, context: CallbackContext):
+async def register(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
-    # Reset session_ended flag to allow new session
-    user_states[user_id] = {"last_message_time": datetime.now()}
-    await update.message.reply_text("Hello! I'm your AI Helpdesk Bot. Please specify a project to start, e.g., 'I want to ask about the TaskTracker project.' You can then ask questions without repeating the project name.")
-    logger.info(f"User {user_id} started a new session")
+    if not context.args:
+        await update.message.reply_text("Please provide a registration code: /register <code>")
+        return
+    
+    code = context.args[0]
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT business_id, email FROM Employees WHERE registration_code = ? AND chat_id IS NULL",
+            (code,)
+        )
+        employee = cursor.fetchone()
+        if not employee:
+            await update.message.reply_text("Invalid or used registration code.")
+            return
+        
+        conn.execute(
+            "UPDATE Employees SET chat_id = ?, registration_code = NULL WHERE registration_code = ?",
+            (user_id, code)
+        )
+        conn.commit()
+        await update.message.reply_text(f"Registered successfully for {employee['email']}!")
+    finally:
+        conn.close()
 
 async def handle_message(update: Update, context: CallbackContext):
     await asyncio.sleep(0.5)
@@ -100,57 +179,76 @@ async def handle_message(update: Update, context: CallbackContext):
     user_message_lower = user_message.lower()
     logger.info(f"Received from {user_id}: {user_message}")
 
-    # Check if session has ended
-    if user_states.get(user_id, {}).get("session_ended", False):
-        await update.message.reply_text("Your session has ended. Please use /start to begin a new session.")
-        return
+    # Initialize or restart session if none exists or session has ended
+    if user_id not in user_states or user_states[user_id].get("session_ended", False):
+        user_states[user_id] = {"last_message_time": datetime.now(), "session_ended": False}
+        await update.message.reply_text(
+            "Hi! I'm your AI Helpdesk Bot. Register with /register <code> or ask about a project with #doc_id (e.g., 'Tell me about IMS #ims_v1') or specify a project name (e.g., 'I want to ask about the TaskTracker project')."
+        )
+        logger.info(f"Started new session for user {user_id}")
 
     # Update last message time
-    if user_id not in user_states:
-        user_states[user_id] = {}
     user_states[user_id]["last_message_time"] = datetime.now()
 
     # Check if user is providing an email
     if user_states[user_id].get("awaiting_email"):
         email = user_message.strip()
         if re.match(r"[^@]+@[^@]+\.[^@]+", email):
+            session_id = user_states[user_id].get("session_id")
+            is_unresolved = user_states[user_id].get("is_unresolved", False)
+            summary = user_states[user_id].get("summary", "No summary available.")
+            log_text = user_states[user_id].get("log_text", "No log available.")
             log_session(
                 user_id,
-                user_states[user_id]["query"],
-                user_states[user_id]["response"],
-                user_states[user_id]["resolution"],
-                email
+                user_states[user_id].get("query", ""),
+                user_states[user_id].get("response", ""),
+                "unresolved" if is_unresolved else "resolved",
+                email,
+                session_id,
+                summary if is_unresolved else None
             )
             try:
-                send_case_email(email, user_states[user_id]["query"], user_states[user_id]["response"])
-                await update.message.reply_text("Thanks! I've recorded the case and sent a confirmation to your email. Please use /start to begin a new session.")
-                # Fully end session by setting session_ended flag and clearing state
+                send_case_email(email, session_id, is_unresolved, summary, log_text)
+                await update.message.reply_text("Thanks! I've recorded the case and sent a confirmation to your email. Start a new session by sending any message.")
                 user_states[user_id] = {"session_ended": True}
                 logger.info(f"Session ended for user {user_id} after successful email submission")
             except Exception as e:
                 logger.error(f"Failed to send email confirmation: {e}")
-                await update.message.reply_text("Thanks! I've recorded the case, but there was an issue sending the email confirmation. Please use /start to begin a new session.")
-                # Fully end session even if email fails
+                await update.message.reply_text("Thanks! I've recorded the case, but there was an issue sending the email confirmation. Start a new session by sending any message.")
                 user_states[user_id] = {"session_ended": True}
                 logger.info(f"Session ended for user {user_id} after email submission (with error)")
         else:
             await update.message.reply_text("That doesn't look like a valid email. Please try again.")
         return
 
+    # Extract doc_id if present (e.g., #ims_v1)
+    doc_id = None
+    query = user_message
+    if "#" in user_message:
+        parts = user_message.split("#")
+        query = parts[0].strip()
+        doc_id = parts[1].strip()
+
+    # Check access
+    has_access, error_message = check_access(user_id, doc_id)
+    if not has_access:
+        await update.message.reply_text(error_message)
+        return
+
     # Check for project specification
     project = None
-    query = user_message
-    project_map = get_project_doc_ids()
-    for proj_name, doc_id in project_map.items():
+    project_map = get_project_doc_ids(user_id)  # Pass user_id to filter projects
+    for proj_name, proj_doc_id in project_map.items():
         if proj_name in user_message_lower:
             project = proj_name
+            doc_id = proj_doc_id
             user_states[user_id].update({"project": project, "doc_id": doc_id})
             query = re.sub(r'\b' + re.escape(proj_name) + r'\b', '', user_message, flags=re.IGNORECASE).strip()
             logger.info(f"Selected project: {project}, doc_id: {doc_id} for user {user_id}")
             break
 
-    # If no project specified, use stored project
-    if not project:
+    # If no project/doc_id specified, use stored project
+    if not project and not doc_id:
         if user_id in user_states and "project" in user_states[user_id]:
             project = user_states[user_id]["project"]
             doc_id = user_states[user_id]["doc_id"]
@@ -160,22 +258,23 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text(f"⚠️ Please specify a project, e.g., 'I want to ask about the TaskTracker project.' Available projects: {project_list}")
             return
 
-    # Check for closing phrases and send "End Session" button
+    # Check for closing phrases
     if any(phrase in user_message_lower for phrase in CLOSING_PHRASES):
         user_states[user_id].update({
             "resolved_pending": True,
             "query": user_states[user_id].get("query", user_message),
             "response": user_states[user_id].get("response", ""),
-            "resolution": user_states[user_id].get("resolution", "pending"),
-            "last_message_time": datetime.now()
+            "resolution": "pending",
+            "last_message_time": datetime.now(),
+            "session_id": user_states[user_id].get("session_id", str(uuid.uuid4()))
         })
-        # Send inline keyboard with "End Session" button
         keyboard = [
-            [InlineKeyboardButton("End Session", callback_data="end_session")]
+            [InlineKeyboardButton("Resolved", callback_data="resolve_session"),
+             InlineKeyboardButton("Unresolved", callback_data="unresolve_session")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "It looks like you're wrapping up! Click 'End Session' to provide an email for confirmation, or continue asking questions.",
+            "It looks like you're wrapping up! Was your query resolved or unresolved? Please select an option.",
             reply_markup=reply_markup
         )
         return
@@ -185,45 +284,49 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text(f"Got it! You're asking about the {project} project. What specifically would you like to know?")
         return
 
+    # Manage session ID
+    session_id = session_manager.get_session(user_id) or str(uuid.uuid4())
+    session_manager.set_session(user_id, session_id)
+
     try:
-        response, resolution = answer_query(query, user_id, doc_id)
-    except Exception as e:
-        logger.error(f"Error processing query for doc_id {doc_id}: {e}")
-        await update.message.reply_text("OK, something broke while processing your query. Try again, please.")
-        return
+        response = answer_query(query, user_id, doc_id)  # Expect only response from answer_query
+        for attempt in range(3):
+            try:
+                await update.message.reply_text(response)
+                break
+            except NetworkError as e:
+                logger.warning(f"Network error on attempt {attempt + 1}: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                else:
+                    logger.error(f"Failed to send response after 3 attempts: {e}")
+                    await update.message.reply_text("⚠️ I'm having trouble sending the response due to a network issue. Please try again later.")
+                    return
 
-    log_session(user_id, user_message, response, resolution)
-
-    for attempt in range(3):
+        # Log query with "pending" resolution
+        log_session(user_id, user_message, response, "pending", session_id=session_id)
+        conn = get_db_connection()
         try:
-            await update.message.reply_text(response)
-            break
-        except NetworkError as e:
-            logger.warning(f"Network error on attempt {attempt + 1}: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
-            else:
-                logger.error(f"Failed to send response after 3 attempts: {e}")
-                await update.message.reply_text("⚠️ I'm having trouble sending the response due to a network issue. Please try again later.")
-                return
+            conn.execute(
+                "INSERT INTO QueryLogs (chat_id, query, response, resolution_status, session_id) VALUES (?, ?, ?, ?, ?)",
+                (user_id, user_message, response, "pending", session_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
-    if resolution == "resolved":
+        # Store query and response for potential later use
         user_states[user_id].update({
-            "resolved_pending": True,
             "query": user_message,
             "response": response,
-            "resolution": resolution,
-            "last_message_time": datetime.now()
+            "resolution": "pending",
+            "last_message_time": datetime.now(),
+            "session_id": session_id
         })
-        # Send inline keyboard with "End Session" button
-        keyboard = [
-            [InlineKeyboardButton("End Session", callback_data="end_session")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "Your query seems resolved! Click 'End Session' to provide an email for confirmation, or continue asking questions.",
-            reply_markup=reply_markup
-        )
+
+    except Exception as e:
+        logger.error(f"Error processing query for user {user_id}, doc_id {doc_id}: {e}")
+        await update.message.reply_text("OK, something broke while processing your query. Try again, please.")
 
 # === Button Callback Handler ===
 async def button_callback(update: Update, context: CallbackContext):
@@ -231,17 +334,37 @@ async def button_callback(update: Update, context: CallbackContext):
     await query.answer()
     user_id = str(query.from_user.id)
 
-    if query.data == "end_session" and user_id in user_states and user_states[user_id].get("resolved_pending"):
-        user_states[user_id]["awaiting_email"] = True
-        user_states[user_id]["resolved_pending"] = False
+    if query.data in ["resolve_session", "unresolve_session"] and user_id in user_states and user_states[user_id].get("resolved_pending"):
+        is_unresolved = query.data == "unresolve_session"
+        session_id = user_states[user_id].get("session_id", str(uuid.uuid4()))
+
+        # Fetch conversation log
+        conn = get_db_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT query, response FROM QueryLogs WHERE session_id = ? ORDER BY timestamp",
+                (session_id,)
+            )
+            logs = cursor.fetchall()
+            log_text = "\n".join([f"Q: {log['query']}\nA: {log['response']}" for log in logs])
+        finally:
+            conn.close()
+
+        # Generate summary using LLM
+        summary = summarize_session(log_text)
+
+        user_states[user_id].update({
+            "awaiting_email": True,
+            "resolved_pending": False,
+            "is_unresolved": is_unresolved,
+            "summary": summary,
+            "log_text": log_text,
+            "session_id": session_id
+        })
         await query.message.reply_text("Please provide your email address to receive a case confirmation.")
-        logger.info(f"User {user_id} clicked 'End Session' to provide email")
+        logger.info(f"User {user_id} marked session as {'unresolved' if is_unresolved else 'resolved'} and prompted for email")
 
-async def post_init(app: Application) -> None:
-    """Schedule check_inactivity task after Application initialization."""
-    app.create_task(check_inactivity(app))
-    logger.info("Scheduled check_inactivity task")
-
+# === Error Handler ===
 async def error_handler(update: object, context: CallbackContext):
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     if isinstance(update, Update) and update.message:
@@ -249,12 +372,13 @@ async def error_handler(update: object, context: CallbackContext):
             await update.message.reply_text("⚠️ Sorry, something went wrong. Our team is looking into it.")
         except NetworkError as e:
             logger.error(f"Network error while sending error message: {e}")
-            pass
 
-def register_handlers(app: Application):
+# === Bot Setup ===
+def setup_bot(token: str):
+    application = Application.builder().token(token).build()
     init_db()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_error_handler(error_handler)
-    app.post_init = post_init
+    application.add_handler(CommandHandler("register", register))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_error_handler(error_handler)
+    return application

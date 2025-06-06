@@ -1,0 +1,31 @@
+FYP progress update
+- link telegram to db to double check credentials = done
+- must demo credentials db for fyp presentation
+- create landing page
+- update architecture for credentials
+- check if the recent history will be available after every session
+- check if info is store in user side and ai side
+- link to real human if cannot answer, if cannot intervene, maybe email them
+- keep logs of the unresolved queries, summarize session and store in db and send to human support and cc employee = done
+- in email can send whole log, in db must summarize content (brief)
+- multilingual wait first, focus on human support escalation and caching
+- push multilingual to end stage in metholodogy, drop multilingual if cannot finish other important refinement
+- remove /start
+- what to do for project not included
+- link available project to the credentials
+- landing page, tele link, admin login to check credentials and list of projects linked to the credentials
+- next week, verify about retail process, how to find their wiki, how to evaluate llm performance, prepare fyp slide, demo and ask for more explanation
+- testing prepare after friday, just update the implementation, updated architecture in slide, if all done then can create testing, must show them the credential when demo
+- check diff type XML content
+
+evaluate
+- use human expert testing for fyp1
+- use qwen for secondary testing in fyp2
+- can do testing in fyp2, if cannot finish
+- want to see landing page and tell what is your planning for fyp1 and fyp2, if multilingual too complicated, drop it
+
+testing
+- prepare some queries and matching answers
+
+issues
+-after talking about one project, when i want to jump to another project it does not work = solved
