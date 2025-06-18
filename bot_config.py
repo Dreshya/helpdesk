@@ -210,12 +210,12 @@ async def handle_message(update: Update, context: CallbackContext):
             try:
                 send_case_email(email, session_id, is_unresolved, summary, log_text)
                 await update.message.reply_text("Thanks! I've recorded the case and sent a confirmation to your email. Start a new session by sending any message.")
-                user_states[user_id] = {"session_ended": True}
+                user_states[user_id] = {}  # Clear state to start fresh
                 logger.info(f"Session ended for user {user_id} after successful email submission")
             except Exception as e:
                 logger.error(f"Failed to send email confirmation: {e}")
                 await update.message.reply_text("Thanks! I've recorded the case, but there was an issue sending the email confirmation. Start a new session by sending any message.")
-                user_states[user_id] = {"session_ended": True}
+                user_states[user_id] = {}  # Clear state to start fresh
                 logger.info(f"Session ended for user {user_id} after email submission (with error)")
         else:
             await update.message.reply_text("That doesn't look like a valid email. Please try again.")
@@ -353,14 +353,16 @@ async def button_callback(update: Update, context: CallbackContext):
         # Generate summary using LLM
         summary = summarize_session(log_text)
 
-        user_states[user_id].update({
+        # Clear session state
+        from qa_chain import end_session
+        end_session(user_id)  # Clear user_sessions and user_memories
+        user_states[user_id] = {
             "awaiting_email": True,
-            "resolved_pending": False,
             "is_unresolved": is_unresolved,
             "summary": summary,
             "log_text": log_text,
             "session_id": session_id
-        })
+        }  # Set minimal state for email prompt
         await query.message.reply_text("Please provide your email address to receive a case confirmation.")
         logger.info(f"User {user_id} marked session as {'unresolved' if is_unresolved else 'resolved'} and prompted for email")
 

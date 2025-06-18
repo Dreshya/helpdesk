@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import os
 
 async def start_background_tasks(app):
-    # Schedule the check_inactivity task
+    # Schedule the check_inactivity task 
     app.create_task(check_inactivity(app))
 
 def main():

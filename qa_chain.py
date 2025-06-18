@@ -52,11 +52,10 @@ def clear_cache_and_memory():
 def end_session(user_id: str) -> str:
     if user_id in user_sessions:
         del user_sessions[user_id]
-        if user_id in user_memories:
-            del user_memories[user_id]
-        logger.info(f"Session ended for user {user_id}")
-        return "Session ended. Please specify a new project to start a new session."
-    return "No active session to end."
+    if user_id in user_memories:
+        del user_memories[user_id]
+    logger.info(f"Session ended for user {user_id}")
+    return "Session ended. Please specify a new project to start a new session."
 
 # === Fuzzy Match Project Name ===
 def get_closest_project_name(query: str, project_names: list, threshold: int = 80) -> str:

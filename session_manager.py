@@ -89,10 +89,11 @@ def send_case_email(email: str, session_id: str, is_unresolved: bool, summary: s
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = email
-    msg["Subject"] = f"RESOLVED: AI Helpdesk Session Log (Session ID: {session_id})"
+    # Set subject based on resolution status
+    msg["Subject"] = f"{'UNRESOLVED' if is_unresolved else 'RESOLVED'}: AI Helpdesk Session Log (Session ID: {session_id})"
     if is_unresolved:
         msg["Cc"] = "support@company.com"
-        msg["Subject"] = f"UNRESOLVED: AI Helpdesk Session Log (Session ID: {session_id})"
+
     body = f"""
 Dear User,
 
