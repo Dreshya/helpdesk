@@ -20,7 +20,7 @@ user_sessions = {}  # Tracks active doc_id per user
 
 # === Prompt Templates ===
 prompt_template = PromptTemplate.from_template("""
-You are a support bot answering **in English only** using **ONLY** the provided document context for ID '{doc_id}'. **Do not use external knowledge, assumptions, or general information.** Provide a concise answer (up to 4 sentences, max 200 words) directly based on the context. If the context does not contain specific details to answer the question (e.g., usage instructions, steps, or procedures), respond: "I couldn't find relevant information for '{doc_id}' in the documentation. Please clarify or provide more details."
+You are a support bot answering **in English only** using **ONLY** the provided document context for project ID '{doc_id}'. **Do not use external knowledge, assumptions, or general information.** Provide a concise answer (up to 4 sentences, max 200 words) directly based on the context, including details about dependencies, technologies, requirements, or other specific information if relevant. If the context does not contain specific details to answer the question, respond: "I couldn't find specific details for '{question}' in the '{doc_id}' documentation. Please clarify or provide more details."
 
 Document Context:
 {context}
@@ -72,7 +72,7 @@ def get_project_names(retriever) -> list:
         # Fetch all documents without filtering to get unique doc_ids
         all_docs = retriever.vectorstore.similarity_search_with_score(
             query="",
-            k=1000  # Large enough to get all documents; adjust as needed
+            k=100  # Reduced from 1000 to optimize
         )
         project_names = list(set(doc.metadata.get("doc_id") for doc, _ in all_docs if doc.metadata.get("doc_id")))
         logger.info(f"Fetched project names from Chroma: {project_names}")
@@ -141,7 +141,7 @@ def answer_query(query: str, user_id: str, doc_id: str = None) -> str:
             k=5
         )
 
-    # Fetch document from Chroma
+    # Fetch documents from Chroma
     try:
         retriever = get_retriever(doc_id)
         docs_with_scores = retriever.vectorstore.similarity_search_with_score(
@@ -151,27 +151,16 @@ def answer_query(query: str, user_id: str, doc_id: str = None) -> str:
         )
         logger.info(f"Retrieved context for doc_id: {doc_id}, Documents: {len(docs_with_scores)}")
         for doc, score in docs_with_scores:
-            logger.info(f"Doc content: {doc.page_content}, Metadata: {doc.metadata}, Score: {score}")
+            logger.info(f"Doc content: {doc.page_content[:200]}..., Metadata: {doc.metadata}, Score: {score}")
 
         if not docs_with_scores:
             logger.warning(f"No documents found for doc_id: {doc_id}")
             return f"I couldn't find relevant information for '{doc_id}' in the documentation. Please clarify or provide more details."
 
-        # For broad queries, prioritize documents with ProjectInfo
-        if is_broad_query(query):
-            project_info_docs = [(doc, score) for doc, score in docs_with_scores if "ProjectInfo" in doc.page_content]
-            if project_info_docs:
-                most_relevant_doc = min(project_info_docs, key=lambda x: x[1])
-                logger.info(f"Selected ProjectInfo document with score: {most_relevant_doc[1]}")
-            else:
-                most_relevant_doc = min(docs_with_scores, key=lambda x: x[1])
-                logger.info(f"No ProjectInfo found, selected most relevant document with score: {most_relevant_doc[1]}")
-        else:
-            most_relevant_doc = min(docs_with_scores, key=lambda x: x[1])
-            logger.info(f"Selected most relevant document with score: {most_relevant_doc[1]}")
+        # Combine all relevant documents for context
+        context = "\n\n".join([doc.page_content for doc, _ in docs_with_scores])
+        logger.info(f"Combined context length: {len(context)} characters, Documents used: {len(docs_with_scores)}")
 
-        context = most_relevant_doc[0].page_content
- 
     except Exception as e:
         logger.error(f"Retriever failed for doc_id {doc_id}: {e}")
         return f"I couldn't find relevant information for '{doc_id}' in the documentation. Please clarify or provide more details."
@@ -188,16 +177,16 @@ def answer_query(query: str, user_id: str, doc_id: str = None) -> str:
             "chat_history": user_memories[user_id].load_memory_variables({})["chat_history"]
         })
         raw_answer = response["text"]
-        logger.info(f"Raw LLM response for user {user_id}: {raw_answer}")
+        logger.info(f"Raw LLM response for user {user_id}: {raw_answer[:200]}...")
     except Exception as e:
         logger.error(f"LLM invocation failed for user {user_id}: {e}")
         return "Sorry, I'm having trouble connecting to the AI model. Try again later."
 
     # Clean and validate response
     answer = clean_response(raw_answer)
-    if not answer or len(answer.strip()) < 10 or "sorry" in answer.lower() or "couldn't find" in answer.lower():
+    if not answer or len(answer.strip()) < 10:
         logger.warning(f"Invalid or empty response: {answer}")
-        answer = f"I couldn't find relevant information for '{doc_id}' in the documentation. Please clarify or provide more details."
+        answer = f"I couldn't find specific details for '{query}' in the '{doc_id}' documentation. Please clarify or provide more details."
 
     # Save to memory
     user_memories[user_id].save_context({"question": query}, {"answer": answer})

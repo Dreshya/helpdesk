@@ -1,4 +1,4 @@
-import sqlite3
+import psycopg2
 from datetime import datetime
 import logging
 import smtplib
@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 from langchain.prompts import PromptTemplate
 from settings import llm
+from psycopg2.extras import DictCursor
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO)
@@ -26,30 +27,65 @@ Summary (in English):
 # === SessionManager Class ===
 class SessionManager:
     def __init__(self):
-        self.sessions = {}  # In-memory storage for user_id -> session_id mapping
+        self.sessions = {}
 
     def get_session(self, user_id: str) -> str:
-        """Retrieve the session ID for a given user_id."""
         return self.sessions.get(user_id)
 
     def set_session(self, user_id: str, session_id: str):
-        """Set the session ID for a given user_id."""
         self.sessions[user_id] = session_id
         logger.info(f"Set session for user {user_id}: {session_id}")
 
     def clear_session(self, user_id: str):
-        """Clear the session for a given user_id."""
         if user_id in self.sessions:
             del self.sessions[user_id]
             logger.info(f"Cleared session for user {user_id}")
 
 def init_db():
-    conn = sqlite3.connect("helpdesk.db")
+    conn = psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST"),
+        port=os.getenv("POSTGRES_PORT"),
+        dbname=os.getenv("POSTGRES_DB"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD")
+    )
     cursor = conn.cursor()
-    # Create QueryLogs table with summary column for unresolved queries
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Businesses (
+            business_id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Employees (
+            employee_id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES Businesses(business_id) ON DELETE CASCADE,
+            employee_name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            chat_id TEXT,
+            registration_code TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Subscriptions (
+            subscription_id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES Businesses(business_id) ON DELETE CASCADE,
+            start_date DATE NOT NULL,
+            end_date DATE NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ProjectAccess (
+            access_id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES Businesses(business_id) ON DELETE CASCADE,
+            doc_id TEXT NOT NULL,
+            doc_name TEXT
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS QueryLogs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             chat_id TEXT NOT NULL,
             query TEXT NOT NULL,
             response TEXT NOT NULL,
@@ -60,20 +96,37 @@ def init_db():
         )
     """)
     conn.commit()
+    cursor.close()
     conn.close()
-    logger.info("Initialized helpdesk.db with updated schema")
+    logger.info("Initialized helpdesk database with updated schema")
 
 def log_session(user_id: str, query: str, response: str, resolution: str, email: str = None, session_id: str = None, summary: str = None):
-    conn = sqlite3.connect("helpdesk.db")
-    cursor = conn.cursor()
-    timestamp = datetime.utcnow().isoformat()
-    cursor.execute(
-        "INSERT INTO QueryLogs (chat_id, query, response, resolution_status, session_id, timestamp, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, query, response, resolution, session_id, timestamp, summary if resolution == "unresolved" else None)
+    conn = psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST"),
+        port=os.getenv("POSTGRES_PORT"),
+        dbname=os.getenv("POSTGRES_DB"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD")
     )
-    conn.commit()
-    conn.close()
-    logger.info(f"Logged session for user {user_id}, session_id: {session_id}, query: {query[:50]}..., summary: {summary[:50] if summary else 'None'}...")
+    cursor = conn.cursor()
+    # Generate timestamp as ISO string
+    timestamp = datetime.utcnow().isoformat()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO QueryLogs (chat_id, query, response, resolution_status, session_id, timestamp, summary)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (user_id, query, response, resolution, session_id, timestamp, summary if resolution == "unresolved" else None)
+        )
+        conn.commit()
+        logger.info(f"Logged session for user {user_id}, session_id: {session_id}, query: {query[:50]}..., summary: {summary[:50] if summary else 'None'}...")
+    except Exception as e:
+        logger.error(f"Failed to log session for user {user_id}: {e}")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
 def send_case_email(email: str, session_id: str, is_unresolved: bool, summary: str, log_text: str):
     load_dotenv()
@@ -89,7 +142,6 @@ def send_case_email(email: str, session_id: str, is_unresolved: bool, summary: s
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = email
-    # Set subject based on resolution status
     msg["Subject"] = f"{'UNRESOLVED' if is_unresolved else 'RESOLVED'}: AI Helpdesk Session Log (Session ID: {session_id})"
     if is_unresolved:
         msg["Cc"] = "support@company.com"
@@ -123,10 +175,8 @@ def summarize_session(log_text: str) -> str:
         return "Brief interaction with no significant details"
     
     try:
-        # Use LLM to generate a summary
         prompt = summary_prompt_template.format(log_text=log_text)
         summary = llm.invoke(prompt).strip()
-        # Ensure summary is within 100 words
         words = summary.split()
         if len(words) > 100:
             summary = " ".join(words[:100]) + "..."

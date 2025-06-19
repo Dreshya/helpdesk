@@ -5,6 +5,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
+import io
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO)
@@ -16,12 +17,19 @@ collection = chroma_client.get_or_create_collection(name="xml_knowledge")
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # === Text Extraction ===
-def extract_text_from_xml(file_path):
+def extract_text_from_xml(xml_input):
     parser = etree.XMLParser(recover=True)
     try:
-        tree = etree.parse(file_path, parser)
+        if isinstance(xml_input, (str, os.PathLike)):
+            # Handle file path
+            tree = etree.parse(xml_input, parser)
+        elif isinstance(xml_input, bytes):
+            # Handle bytes input
+            tree = etree.parse(io.BytesIO(xml_input), parser)
+        else:
+            raise ValueError(f"Expected str, os.PathLike, or bytes, got {type(xml_input)}")
     except etree.XMLSyntaxError as e:
-        logger.error(f"XML parsing error in {file_path}: {e}")
+        logger.error(f"XML parsing error: {e}")
         return ""
     root = tree.getroot()
 
@@ -51,15 +59,15 @@ def embed_chunks(chunks):
     return embedding_model.encode(chunks, show_progress_bar=True)
 
 # === Storing in ChromaDB ===
-def store_in_chromadb(chunks, embeddings, xml_filename, doc_id=None):
-    doc_id = doc_id or os.path.basename(xml_filename)
+def store_in_chromadb(chunks, embeddings, source_identifier, doc_id):
+    doc_id = doc_id or source_identifier
     existing_ids = collection.get()['ids']
     if any(id.startswith(f"{doc_id}_chunk_") for id in existing_ids):
         logger.warning(f"Document {doc_id} already processed. Skipping.")
         return
     for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
         metadata = {
-            "source_file": os.path.basename(xml_filename),
+            "source_file": source_identifier,
             "doc_id": doc_id,
             "chunk_index": i
         }
@@ -71,11 +79,14 @@ def store_in_chromadb(chunks, embeddings, xml_filename, doc_id=None):
         )
 
 # === Main Pipeline ===
-def process_and_store_xml(xml_path, doc_id=None):
-    raw_text = extract_text_from_xml(xml_path)
+def process_and_store_xml(xml_input, doc_id=None):
+    raw_text = extract_text_from_xml(xml_input)
     if not raw_text:
         return []
     chunks = chunk_text(raw_text)
     embeddings = embed_chunks(chunks)
-    store_in_chromadb(chunks, embeddings, xml_path, doc_id)
+    # Use doc_id as source_identifier if no file path is provided
+    source_identifier = os.path.basename(xml_input) if isinstance(xml_input, str) else doc_id or "uploaded_xml"
+    store_in_chromadb(chunks, embeddings, source_identifier, doc_id)
+    logger.info(f"Stored {len(chunks)} chunks for doc_id: {doc_id}")
     return chunks

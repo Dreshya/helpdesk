@@ -1,5 +1,5 @@
 import logging
-import sqlite3
+import psycopg2
 import uuid
 import re
 import asyncio
@@ -11,6 +11,8 @@ from cachetools import TTLCache
 from qa_chain import answer_query, clear_cache_and_memory
 from session_manager import SessionManager, init_db, log_session, send_case_email, summarize_session
 from settings import vector_db
+from dotenv import load_dotenv
+import os
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO)
@@ -19,23 +21,35 @@ logger = logging.getLogger(__name__)
 # === Session Manager and State ===
 session_manager = SessionManager()
 user_states = {}
-project_cache = TTLCache(maxsize=100, ttl=86400)  # Cache for 24 hours
+project_cache = TTLCache(maxsize=100, ttl=86400)
 CLOSING_PHRASES = ["thank you", "thanks", "bye", "goodbye", "done", "ok", "okay", "cheers"]
 INACTIVITY_TIMEOUT = timedelta(minutes=5)
 
 # === Database Connection ===
 def get_db_connection():
-    conn = sqlite3.connect('helpdesk.db')
-    conn.row_factory = sqlite3.Row
+    load_dotenv()
+    conn = psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST"),
+        port=os.getenv("POSTGRES_PORT"),
+        dbname=os.getenv("POSTGRES_DB"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD")
+    )
+    conn.cursor_factory = psycopg2.extras.DictCursor
     return conn
 
 # === Check Subscription and Project Access ===
 def check_access(chat_id: str, doc_id: str = None) -> tuple:
     conn = get_db_connection()
     try:
-        # Get employee and business
-        cursor = conn.execute(
-            "SELECT e.business_id, b.name FROM Employees e JOIN Businesses b ON e.business_id = b.business_id WHERE e.chat_id = ?",
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT e.business_id, e.employee_id, b.name
+            FROM Employees e
+            JOIN Businesses b ON e.business_id = b.business_id
+            WHERE e.chat_id = %s
+            """,
             (chat_id,)
         )
         employee = cursor.fetchone()
@@ -43,19 +57,28 @@ def check_access(chat_id: str, doc_id: str = None) -> tuple:
             return False, "You are not registered. Use /register <code> to link your account."
 
         business_id = employee['business_id']
-        # Check subscription
-        cursor = conn.execute(
-            "SELECT end_date FROM Subscriptions WHERE business_id = ? AND end_date >= date('now')",
+        employee_id = employee['employee_id']
+        cursor.execute(
+            """
+            SELECT subscription_id
+            FROM Subscriptions
+            WHERE business_id = %s AND end_date >= CURRENT_DATE AND start_date <= CURRENT_DATE
+            """,
             (business_id,)
         )
         subscription = cursor.fetchone()
         if not subscription:
-            return False, "Your company's subscription has expired."
+            # Clear chat_id if subscription expired
+            cursor.execute(
+                "UPDATE Employees SET chat_id = NULL WHERE employee_id = %s",
+                (employee_id,)
+            )
+            conn.commit()
+            return False, "Your company's subscription has expired. Your chat ID has been cleared. Please contact your admin."
 
-        # Check project access if doc_id provided
         if doc_id:
-            cursor = conn.execute(
-                "SELECT access_id FROM ProjectAccess WHERE business_id = ? AND doc_id = ?",
+            cursor.execute(
+                "SELECT access_id FROM ProjectAccess WHERE business_id = %s AND doc_id = %s",
                 (business_id, doc_id)
             )
             if not cursor.fetchone():
@@ -63,6 +86,7 @@ def check_access(chat_id: str, doc_id: str = None) -> tuple:
         
         return True, None
     finally:
+        cursor.close()
         conn.close()
 
 # === Get Project to doc_id Mapping from Chroma ===
@@ -72,46 +96,45 @@ def get_project_doc_ids(chat_id: str):
         return project_cache[cache_key]
 
     try:
-        # Get business_id for the user
         conn = get_db_connection()
         try:
-            cursor = conn.execute("SELECT business_id FROM Employees WHERE chat_id = ?", (chat_id,))
+            cursor = conn.cursor()
+            cursor.execute("SELECT business_id FROM Employees WHERE chat_id = %s", (chat_id,))
             employee = cursor.fetchone()
             if not employee:
                 logger.error(f"No employee found for chat_id: {chat_id}")
                 return {}
             business_id = employee['business_id']
         finally:
+            cursor.close()
             conn.close()
 
-        # Get accessible doc_ids from ProjectAccess
         conn = get_db_connection()
         try:
-            cursor = conn.execute("SELECT doc_id FROM ProjectAccess WHERE business_id = ?", (business_id,))
-            accessible_doc_ids = {row['doc_id'] for row in cursor.fetchall()}
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT doc_id, doc_name FROM ProjectAccess WHERE business_id = %s",
+                (business_id,)
+            )
+            project_access = cursor.fetchall()
+            accessible_doc_ids = {row['doc_id']: row['doc_name'] for row in project_access}
         finally:
+            cursor.close()
             conn.close()
 
-        # Fetch projects from vector_db and filter by accessible doc_ids
         collection = vector_db.get()
         project_map = {}
         seen_doc_ids = set()
         for embedding_id, content, metadata in zip(collection["ids"], collection["documents"], collection["metadatas"]):
             doc_id = metadata.get("doc_id") if metadata else None
-            if not doc_id:
-                logger.warning(f"No doc_id found in metadata for embedding_id: {embedding_id}")
+            if not doc_id or doc_id not in accessible_doc_ids:
                 continue
-            if doc_id not in accessible_doc_ids:
-                continue  # Skip projects not accessible to the business
             match = re.search(r'ProjectDocumentation > ProjectInfo > ProjectName: (.*?)(?:\n|$)', content, re.IGNORECASE)
-            if match:
-                project_name = match.group(1).strip()
-                if doc_id not in seen_doc_ids:
-                    project_map[project_name.lower()] = doc_id
-                    seen_doc_ids.add(doc_id)
-                    logger.info(f"Found project: {project_name}, doc_id: {doc_id}, embedding_id: {embedding_id} for business_id: {business_id}")
-            else:
-                logger.warning(f"No project name found in document with embedding_id: {embedding_id}, doc_id: {doc_id}, content_snippet: {content[:100]}...")
+            project_name = match.group(1).strip() if match else accessible_doc_ids[doc_id] or doc_id
+            if doc_id not in seen_doc_ids:
+                project_map[project_name.lower()] = doc_id
+                seen_doc_ids.add(doc_id)
+                logger.info(f"Found project: {project_name}, doc_id: {doc_id}, embedding_id: {embedding_id} for business_id: {business_id}")
         if not project_map:
             logger.error(f"No accessible projects found for business_id: {business_id}")
         project_cache[cache_key] = project_map
@@ -142,7 +165,7 @@ async def check_inactivity(app: Application):
                         logger.info(f"Prompted user {user_id} with resolution buttons due to inactivity")
                     except NetworkError as e:
                         logger.error(f"Failed to send inactivity prompt to user {user_id}: {e}")
-        await asyncio.sleep(60)  # Check every minute
+        await asyncio.sleep(60)
 
 # === Telegram Handlers ===
 async def register(update: Update, context: CallbackContext):
@@ -154,8 +177,9 @@ async def register(update: Update, context: CallbackContext):
     code = context.args[0]
     conn = get_db_connection()
     try:
-        cursor = conn.execute(
-            "SELECT business_id, email FROM Employees WHERE registration_code = ? AND chat_id IS NULL",
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT employee_id, business_id, email FROM Employees WHERE registration_code = %s AND chat_id IS NULL",
             (code,)
         )
         employee = cursor.fetchone()
@@ -163,13 +187,14 @@ async def register(update: Update, context: CallbackContext):
             await update.message.reply_text("Invalid or used registration code.")
             return
         
-        conn.execute(
-            "UPDATE Employees SET chat_id = ?, registration_code = NULL WHERE registration_code = ?",
-            (user_id, code)
+        cursor.execute(
+            "UPDATE Employees SET chat_id = %s, registration_code = NULL WHERE employee_id = %s",
+            (user_id, employee['employee_id'])
         )
         conn.commit()
         await update.message.reply_text(f"Registered successfully for {employee['email']}!")
     finally:
+        cursor.close()
         conn.close()
 
 async def handle_message(update: Update, context: CallbackContext):
@@ -179,18 +204,18 @@ async def handle_message(update: Update, context: CallbackContext):
     user_message_lower = user_message.lower()
     logger.info(f"Received from {user_id}: {user_message}")
 
-    # Initialize or restart session if none exists or session has ended
     if user_id not in user_states or user_states[user_id].get("session_ended", False):
         user_states[user_id] = {"last_message_time": datetime.now(), "session_ended": False}
+        project_map = get_project_doc_ids(user_id)
+        project_list = ", ".join(project_map.keys()) or "no projects available"
         await update.message.reply_text(
-            "Hi! I'm your AI Helpdesk Bot. Register with /register <code> or ask about a project with #doc_id (e.g., 'Tell me about IMS #ims_v1') or specify a project name (e.g., 'I want to ask about the TaskTracker project')."
+            f"Hi! I'm your AI Helpdesk Bot. Register with /register <code> or ask about a project with #doc_id (e.g., 'Tell me about IMS #ims_v1') or specify a project name (e.g., 'I want to ask about the TaskTracker project'). Available projects: {project_list}"
         )
         logger.info(f"Started new session for user {user_id}")
+        return
 
-    # Update last message time
     user_states[user_id]["last_message_time"] = datetime.now()
 
-    # Check if user is providing an email
     if user_states[user_id].get("awaiting_email"):
         email = user_message.strip()
         if re.match(r"[^@]+@[^@]+\.[^@]+", email):
@@ -203,25 +228,24 @@ async def handle_message(update: Update, context: CallbackContext):
                 user_states[user_id].get("query", ""),
                 user_states[user_id].get("response", ""),
                 "unresolved" if is_unresolved else "resolved",
-                email,
-                session_id,
-                summary if is_unresolved else None
+                email=email,
+                session_id=session_id,
+                summary=summary if is_unresolved else None
             )
             try:
                 send_case_email(email, session_id, is_unresolved, summary, log_text)
                 await update.message.reply_text("Thanks! I've recorded the case and sent a confirmation to your email. Start a new session by sending any message.")
-                user_states[user_id] = {}  # Clear state to start fresh
+                user_states[user_id] = {}
                 logger.info(f"Session ended for user {user_id} after successful email submission")
             except Exception as e:
                 logger.error(f"Failed to send email confirmation: {e}")
                 await update.message.reply_text("Thanks! I've recorded the case, but there was an issue sending the email confirmation. Start a new session by sending any message.")
-                user_states[user_id] = {}  # Clear state to start fresh
+                user_states[user_id] = {}
                 logger.info(f"Session ended for user {user_id} after email submission (with error)")
         else:
             await update.message.reply_text("That doesn't look like a valid email. Please try again.")
         return
 
-    # Extract doc_id if present (e.g., #ims_v1)
     doc_id = None
     query = user_message
     if "#" in user_message:
@@ -229,15 +253,13 @@ async def handle_message(update: Update, context: CallbackContext):
         query = parts[0].strip()
         doc_id = parts[1].strip()
 
-    # Check access
     has_access, error_message = check_access(user_id, doc_id)
     if not has_access:
         await update.message.reply_text(error_message)
         return
 
-    # Check for project specification
     project = None
-    project_map = get_project_doc_ids(user_id)  # Pass user_id to filter projects
+    project_map = get_project_doc_ids(user_id)
     for proj_name, proj_doc_id in project_map.items():
         if proj_name in user_message_lower:
             project = proj_name
@@ -247,18 +269,16 @@ async def handle_message(update: Update, context: CallbackContext):
             logger.info(f"Selected project: {project}, doc_id: {doc_id} for user {user_id}")
             break
 
-    # If no project/doc_id specified, use stored project
     if not project and not doc_id:
         if user_id in user_states and "project" in user_states[user_id]:
             project = user_states[user_id]["project"]
             doc_id = user_states[user_id]["doc_id"]
             logger.info(f"Using stored project: {project}, doc_id: {doc_id} for user {user_id}")
         else:
-            project_list = ", ".join(project_map.keys()) or "no projects found"
+            project_list = ", ".join(project_map.keys()) or "no projects available"
             await update.message.reply_text(f"⚠️ Please specify a project, e.g., 'I want to ask about the TaskTracker project.' Available projects: {project_list}")
             return
 
-    # Check for closing phrases
     if any(phrase in user_message_lower for phrase in CLOSING_PHRASES):
         user_states[user_id].update({
             "resolved_pending": True,
@@ -279,17 +299,18 @@ async def handle_message(update: Update, context: CallbackContext):
         )
         return
 
-    # Process query
     if not query:
         await update.message.reply_text(f"Got it! You're asking about the {project} project. What specifically would you like to know?")
         return
 
-    # Manage session ID
     session_id = session_manager.get_session(user_id) or str(uuid.uuid4())
     session_manager.set_session(user_id, session_id)
 
     try:
-        response = answer_query(query, user_id, doc_id)  # Expect only response from answer_query
+        response = answer_query(query, user_id, doc_id)
+        if not response or "couldn't find relevant information" in response.lower():
+            response = f"I couldn't find specific details for '{query}' in the {project} documentation. Could you clarify or ask about another aspect?"
+        
         for attempt in range(3):
             try:
                 await update.message.reply_text(response)
@@ -303,19 +324,7 @@ async def handle_message(update: Update, context: CallbackContext):
                     await update.message.reply_text("⚠️ I'm having trouble sending the response due to a network issue. Please try again later.")
                     return
 
-        # Log query with "pending" resolution
         log_session(user_id, user_message, response, "pending", session_id=session_id)
-        conn = get_db_connection()
-        try:
-            conn.execute(
-                "INSERT INTO QueryLogs (chat_id, query, response, resolution_status, session_id) VALUES (?, ?, ?, ?, ?)",
-                (user_id, user_message, response, "pending", session_id)
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        # Store query and response for potential later use
         user_states[user_id].update({
             "query": user_message,
             "response": response,
@@ -325,8 +334,19 @@ async def handle_message(update: Update, context: CallbackContext):
         })
 
     except Exception as e:
-        logger.error(f"Error processing query for user {user_id}, doc_id {doc_id}: {e}")
-        await update.message.reply_text("OK, something broke while processing your query. Try again, please.")
+        logger.error(f"Error processing query for user {user_id}, doc_id: {doc_id}: {e}")
+        error_response = "Sorry, something went wrong while processing your query. Please try again."
+        for attempt in range(3):
+            try:
+                await update.message.reply_text(error_response)
+                break
+            except NetworkError as e:
+                logger.warning(f"Network error on attempt {attempt + 1}: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                else:
+                    logger.error(f"Failed to send error response after 3 attempts: {e}")
+                    return
 
 # === Button Callback Handler ===
 async def button_callback(update: Update, context: CallbackContext):
@@ -338,31 +358,30 @@ async def button_callback(update: Update, context: CallbackContext):
         is_unresolved = query.data == "unresolve_session"
         session_id = user_states[user_id].get("session_id", str(uuid.uuid4()))
 
-        # Fetch conversation log
         conn = get_db_connection()
         try:
-            cursor = conn.execute(
-                "SELECT query, response FROM QueryLogs WHERE session_id = ? ORDER BY timestamp",
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT query, response FROM QueryLogs WHERE session_id = %s ORDER BY timestamp",
                 (session_id,)
             )
             logs = cursor.fetchall()
             log_text = "\n".join([f"Q: {log['query']}\nA: {log['response']}" for log in logs])
         finally:
+            cursor.close()
             conn.close()
 
-        # Generate summary using LLM
         summary = summarize_session(log_text)
 
-        # Clear session state
         from qa_chain import end_session
-        end_session(user_id)  # Clear user_sessions and user_memories
+        end_session(user_id)
         user_states[user_id] = {
             "awaiting_email": True,
             "is_unresolved": is_unresolved,
             "summary": summary,
             "log_text": log_text,
             "session_id": session_id
-        }  # Set minimal state for email prompt
+        }
         await query.message.reply_text("Please provide your email address to receive a case confirmation.")
         logger.info(f"User {user_id} marked session as {'unresolved' if is_unresolved else 'resolved'} and prompted for email")
 
